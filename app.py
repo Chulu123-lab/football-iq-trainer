@@ -1,9 +1,14 @@
-
 import streamlit as st
 import pandas as pd
 import time
 import os
+import re
+import uuid
 from datetime import datetime
+
+# ============================================================
+# FOOTBALL IQ TRAINER
+# ============================================================
 
 st.set_page_config(
     page_title="Football IQ Trainer",
@@ -12,402 +17,779 @@ st.set_page_config(
 )
 
 RESULTS_FILE = "training_results.csv"
+WORKBOOK_FILE = "match_history_workbook.xlsx"
 
-st.title("⚽ Football IQ Trainer")
-st.caption("Train your match analysis, record predictions, and track your results.")
+RESULT_COLUMNS = [
+    "saved_at",
+    "session_id",
+    "fixture",
+    "team_a",
+    "team_b",
+    "prediction",
+    "actual",
+    "correct",
+    "team_a_seconds",
+    "team_b_seconds",
+    "prediction_seconds",
+    "group_number",
+    "worksheet"
+]
 
-for key, default in {
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+defaults = {
     "fixtures": [],
     "index": 0,
     "phase": "setup",
     "answers": {},
     "phase_started": time.time(),
-    "prepared": False
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
+    "prepared": False,
+    "session_id": str(uuid.uuid4()),
+    "last_saved_fixture": None,
+    "training_complete": False
+}
 
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+# ============================================================
+# RESULTS STORAGE
+# ============================================================
 
 def load_results():
-    columns = [
-        "saved_at", "fixture", "team_a", "team_b",
-        "prediction", "actual", "correct",
-        "team_a_seconds", "team_b_seconds",
-        "prediction_seconds", "group_number", "worksheet"
-    ]
     if os.path.exists(RESULTS_FILE):
         try:
-            return pd.read_csv(RESULTS_FILE)
+            df = pd.read_csv(RESULTS_FILE)
+
+            for column in RESULT_COLUMNS:
+                if column not in df.columns:
+                    df[column] = None
+
+            return df[RESULT_COLUMNS]
+
         except Exception:
             pass
-    return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(columns=RESULT_COLUMNS)
 
 
 def save_result(row):
-    exists = os.path.exists(RESULTS_FILE)
-    pd.DataFrame([row]).to_csv(
+    existing = load_results()
+
+    new_row = pd.DataFrame([row])
+
+    updated = pd.concat(
+        [existing, new_row],
+        ignore_index=True
+    )
+
+    updated.to_csv(
         RESULTS_FILE,
-        mode="a",
-        header=not exists,
         index=False
     )
 
 
-def result_to_pick(score):
-    if pd.isna(score):
-        return ""
-    score = str(score).strip()
-    try:
-        a, b = score.replace(":", "-").split("-", 1)
-        a, b = int(a.strip()), int(b.strip())
-        return "1" if a > b else ("2" if a < b else "X")
-    except Exception:
-        return ""
-
+# ============================================================
+# RESULT HELPERS
+# ============================================================
 
 def clean(value):
     if pd.isna(value):
         return ""
-    value = str(value).strip()
-    return "" if value.lower() in ("nan", "none") else value
 
+    return str(value).strip()
+
+
+def result_to_pick(score):
+    """
+    Convert a score into:
+    1 = Team A wins
+    X = Draw
+    2 = Team B wins
+    """
+
+    score = clean(score)
+
+    match = re.match(
+        r"^\s*(\d+)\s*[-:]\s*(\d+)\s*$",
+        score
+    )
+
+    if not match:
+        return ""
+
+    goals_a = int(match.group(1))
+    goals_b = int(match.group(2))
+
+    if goals_a > goals_b:
+        return "1"
+
+    if goals_a == goals_b:
+        return "X"
+
+    return "2"
+
+
+def format_pick(pick):
+    names = {
+        "1": "Team A Win",
+        "X": "Draw",
+        "2": "Team B Win"
+    }
+
+    return names.get(pick, "Unknown")
+
+
+def safe_number(value):
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+
+    return value
+
+
+# ============================================================
+# MATCH HISTORY READER
+# ============================================================
 
 def get_history(sheet, start, team_col):
-    rows = []
-    for i in range(start, min(start + 25, len(sheet))):
-        team = clean(sheet.iloc[i, team_col])
-        opponent = clean(sheet.iloc[i, team_col + 1])
+    """
+    Each team's history occupies eight columns.
 
-        if not team or not opponent:
+    Team A: columns A:H
+    Team B: columns I:P
+
+    Each fixture contains 25 historical match rows.
+    """
+
+    history = []
+
+    column_names = [
+        "Team",
+        "Opponent",
+        "Date",
+        "Result",
+        "GF",
+        "GA",
+        "Win Margin",
+        "Goal Diff"
+    ]
+
+    end = min(
+        start + 25,
+        len(sheet)
+    )
+
+    for row_index in range(start, end):
+
+        row = sheet.iloc[
+            row_index,
+            team_col:team_col + 8
+        ]
+
+        values = [
+            clean(value)
+            for value in row.tolist()
+        ]
+
+        if not values:
             continue
 
-        rows.append({
-            "Team": team,
-            "Opponent": opponent,
-            "Date": sheet.iloc[i, team_col + 2],
-            "Result": sheet.iloc[i, team_col + 3],
-            "GF": sheet.iloc[i, team_col + 4],
-            "GA": sheet.iloc[i, team_col + 5],
-            "Win Margin": sheet.iloc[i, team_col + 6],
-            "Goal Diff": sheet.iloc[i, team_col + 7]
+        if not values[0] and not values[1]:
+            continue
+
+        if not values[0] and not values[1]:
+            continue
+
+        history.append({
+            column_names[i]: values[i]
+            for i in range(8)
         })
-    return rows
+
+    return history
 
 
-def read_workbook(uploaded):
+# ============================================================
+# WORKBOOK READER
+# ============================================================
+
+def read_workbook(workbook_source):
+
+    excel = pd.ExcelFile(workbook_source)
+
     fixtures = []
+    sheet_names = []
     skipped = []
 
-    book = pd.ExcelFile(uploaded)
+    for sheet_name in excel.sheet_names:
 
-    for sheet_name in book.sheet_names:
-        raw = pd.read_excel(
-            book,
-            sheet_name=sheet_name,
-            header=None
-        )
-
-        if raw.shape[1] < 18:
-            skipped.append(
-                f"{sheet_name}: fewer than 18 columns"
+        try:
+            raw = pd.read_excel(
+                excel,
+                sheet_name=sheet_name,
+                header=None
             )
-            continue
 
-        sheet_fixtures = 0
-
-        # First row is assumed to contain column headings.
-        # Each following fixture occupies 25 rows.
-        for start in range(1, len(raw), 25):
-            hist_a = get_history(raw, start, 0)
-            hist_b = get_history(raw, start, 8)
-
-            if not hist_a or not hist_b:
+            if raw.shape[1] < 18:
+                skipped.append(
+                    f"{sheet_name}: fewer than 18 columns"
+                )
                 continue
 
-            # Ignore blocks that do not contain the expected
-            # Team A and Team B histories.
-            team_a = hist_a[0]["Team"]
-            team_b = hist_b[0]["Team"]
+            sheet_fixture_count = 0
 
-            score = raw.iloc[start, 16]
-            date = raw.iloc[start, 17]
+            # Row 1 is the header.
+            # Each fixture block contains 25 history rows.
+            #
+            # Zero-based starting rows:
+            # 1, 26, 51, 76, ...
+            #
+            # Excel starting rows:
+            # 2, 27, 52, 77, ...
 
-            fixtures.append({
-                "team_a": team_a,
-                "team_b": team_b,
-                "history_a": hist_a,
-                "history_b": hist_b,
-                "actual_score": score,
-                "actual_date": date,
-                "worksheet": sheet_name
-            })
-            sheet_fixtures += 1
+            for start in range(1, len(raw), 25):
 
-        if sheet_fixtures == 0:
-            skipped.append(
-                f"{sheet_name}: no fixture blocks found"
-            )
-
-    return fixtures, book.sheet_names, skipped
-
-
-st.header("1. Load match history")
-
-st.write(
-    "Upload one Excel workbook. The app will read all its "
-    "worksheets automatically. Your original workbook is not edited."
-)
-
-uploaded = st.file_uploader(
-    "Upload match history workbook",
-    type=["xlsx", "xls"]
-)
-
-if uploaded is not None:
-    if st.button("Prepare fixtures", type="primary"):
-        try:
-            with st.spinner("Reading all worksheets..."):
-                fixtures, sheet_names, skipped = read_workbook(uploaded)
-
-            if not fixtures:
-                st.error(
-                    "No fixtures were found. The workbook layout "
-                    "may differ from the expected 25-row blocks."
+                team_a_history = get_history(
+                    raw,
+                    start,
+                    0
                 )
-            else:
-                st.session_state.fixtures = fixtures
-                st.session_state.index = 0
-                st.session_state.answers = {}
-                st.session_state.phase = "team_a"
-                st.session_state.phase_started = time.time()
-                st.session_state.prepared = True
 
-                st.success(
-                    f"Prepared {len(fixtures)} fixtures from "
-                    f"{len(sheet_names)} worksheets."
+                team_b_history = get_history(
+                    raw,
+                    start,
+                    8
                 )
-                st.write("Worksheets found:", ", ".join(sheet_names))
 
-                if skipped:
-                    st.warning(
-                        "Some worksheets had no usable fixtures:\n\n"
-                        + "\n".join(skipped)
+                if not team_a_history or not team_b_history:
+                    continue
+
+                team_a = clean(
+                    team_a_history[0].get("Team", "")
+                )
+
+                team_b = clean(
+                    team_b_history[0].get("Team", "")
+                )
+
+                if not team_a or not team_b:
+                    continue
+
+                actual_score = ""
+
+                actual_date = ""
+
+                if start < len(raw):
+
+                    actual_score = clean(
+                        raw.iloc[start, 16]
                     )
 
-        except Exception as e:
-            st.error(f"Could not read the workbook: {e}")
+                    actual_date = clean(
+                        raw.iloc[start, 17]
+                    )
+
+                fixture = {
+                    "fixture": len(fixtures) + 1,
+                    "worksheet": sheet_name,
+                    "team_a": team_a,
+                    "team_b": team_b,
+                    "team_a_history": team_a_history,
+                    "team_b_history": team_b_history,
+                    "actual_score": actual_score,
+                    "actual_date": actual_date
+                }
+
+                fixtures.append(fixture)
+
+                sheet_fixture_count += 1
+
+            if sheet_fixture_count > 0:
+                sheet_names.append(sheet_name)
+            else:
+                skipped.append(
+                    f"{sheet_name}: no valid fixtures found"
+                )
+
+        except Exception as error:
+
+            skipped.append(
+                f"{sheet_name}: {str(error)}"
+            )
+
+    return fixtures, sheet_names, skipped
 
 
-if st.session_state.fixtures:
+# ============================================================
+# RESET TRAINING
+# ============================================================
+
+def reset_training():
+
+    st.session_state.fixtures = []
+    st.session_state.index = 0
+    st.session_state.phase = "setup"
+    st.session_state.answers = {}
+    st.session_state.phase_started = time.time()
+    st.session_state.prepared = False
+    st.session_state.last_saved_fixture = None
+    st.session_state.training_complete = False
+    st.session_state.session_id = str(uuid.uuid4())
+
+
+# ============================================================
+# APPLICATION HEADER
+# ============================================================
+
+st.title("⚽ Football IQ Trainer")
+
+st.write(
+    "Train your football prediction skills using historical "
+    "match data. Review both teams, make a prediction, reveal "
+    "the result, and track your accuracy."
+)
+
+st.divider()
+
+
+# ============================================================
+# SETUP SCREEN
+# ============================================================
+
+if st.session_state.phase == "setup":
+
+    st.header("Load Your Match History")
+
+    st.write(
+        "Choose one of the available methods to load your workbook."
+    )
+
+    load_method = st.radio(
+        "Workbook source",
+        [
+            "Google Drive link",
+            "Upload Excel file"
+        ],
+        horizontal=True
+    )
+
+    if load_method == "Google Drive link":
+
+        st.info(
+            "Your Google Drive file must be accessible to the "
+            "app through its sharing link."
+        )
+
+        drive_link = st.text_input(
+            "Google Drive Excel file link",
+            placeholder=(
+                "https://drive.google.com/file/d/FILE_ID/view"
+            ),
+            key="drive_link"
+        )
+
+        if st.button(
+            "Prepare fixtures",
+            type="primary",
+            key="prepare_drive"
+        ):
+
+            if not drive_link.strip():
+
+                st.warning(
+                    "Paste your Google Drive file link first."
+                )
+
+            else:
+
+                try:
+
+                    import gdown
+
+                    with st.spinner(
+                        "Downloading your Excel workbook..."
+                    ):
+
+                        downloaded_file = gdown.download(
+                            url=drive_link.strip(),
+                            output=WORKBOOK_FILE,
+                            quiet=False,
+                            fuzzy=True
+                        )
+
+                    if (
+                        not downloaded_file
+                        or not os.path.exists(downloaded_file)
+                    ):
+
+                        st.error(
+                            "The download failed. Check the "
+                            "Google Drive link and its sharing settings."
+                        )
+
+                    else:
+
+                        with st.spinner(
+                            "Reading all worksheets and fixtures..."
+                        ):
+
+                            fixtures, sheet_names, skipped = (
+                                read_workbook(downloaded_file)
+                            )
+
+                        if not fixtures:
+
+                            st.error(
+                                "No fixtures were found. Check that "
+                                "your workbook follows the expected "
+                                "18-column layout and 25-match blocks."
+                            )
+
+                        else:
+
+                            st.session_state.fixtures = fixtures
+                            st.session_state.index = 0
+                            st.session_state.answers = {}
+                            st.session_state.phase = "team_a"
+                            st.session_state.phase_started = (
+                                time.time()
+                            )
+                            st.session_state.prepared = True
+                            st.session_state.training_complete = False
+                            st.session_state.last_saved_fixture = None
+                            st.session_state.session_id = str(
+                                uuid.uuid4()
+                            )
+
+                            st.success(
+                                f"Loaded {len(fixtures)} fixtures "
+                                f"from {len(sheet_names)} worksheets."
+                            )
+
+                            if skipped:
+
+                                with st.expander(
+                                    "Worksheets skipped or with warnings"
+                                ):
+
+                                    for message in skipped:
+                                        st.write(message)
+
+                            st.rerun()
+
+                except Exception as error:
+
+                    st.error(
+                        f"Could not load the workbook: {error}"
+                    )
+
+    else:
+
+        uploaded = st.file_uploader(
+            "Upload match history workbook",
+            type=["xlsx", "xls"],
+            key="excel_upload"
+        )
+
+        if st.button(
+            "Prepare fixtures",
+            type="primary",
+            key="prepare_upload"
+        ):
+
+            if uploaded is None:
+
+                st.warning(
+                    "Choose an Excel workbook first."
+                )
+
+            else:
+
+                try:
+
+                    with st.spinner(
+                        "Reading all worksheets and fixtures..."
+                    ):
+
+                        fixtures, sheet_names, skipped = (
+                            read_workbook(uploaded)
+                        )
+
+                    if not fixtures:
+
+                        st.error(
+                            "No fixtures were found. Check the "
+                            "workbook layout."
+                        )
+
+                    else:
+
+                        st.session_state.fixtures = fixtures
+                        st.session_state.index = 0
+                        st.session_state.answers = {}
+                        st.session_state.phase = "team_a"
+                        st.session_state.phase_started = time.time()
+                        st.session_state.prepared = True
+                        st.session_state.training_complete = False
+                        st.session_state.last_saved_fixture = None
+                        st.session_state.session_id = str(uuid.uuid4())
+
+                        st.success(
+                            f"Loaded {len(fixtures)} fixtures "
+                            f"from {len(sheet_names)} worksheets."
+                        )
+
+                        if skipped:
+
+                            with st.expander(
+                                "Worksheets skipped or with warnings"
+                            ):
+
+                                for message in skipped:
+                                    st.write(message)
+
+                        st.rerun()
+
+                except Exception as error:
+
+                    st.error(
+                        f"Could not read the workbook: {error}"
+                    )
+
+
+# ============================================================
+# TRAINING SCREEN
+# ============================================================
+
+elif st.session_state.phase in [
+    "team_a",
+    "team_b",
+    "predict",
+    "reveal"
+]:
+
     fixtures = st.session_state.fixtures
     idx = st.session_state.index
 
-    st.divider()
-    st.header("2. Training")
+    if not fixtures:
 
-    if idx < len(fixtures):
+        st.warning("No fixtures are loaded.")
+
+        if st.button("Return to setup"):
+            reset_training()
+            st.rerun()
+
+    elif idx >= len(fixtures):
+
+        st.session_state.phase = "complete"
+        st.rerun()
+
+    else:
+
         fixture = fixtures[idx]
 
-        st.caption(
-            f"Worksheet: {fixture['worksheet']} · "
-            f"Fixture {idx + 1} of {len(fixtures)}"
-        )
-        st.subheader(
-            f"{fixture['team_a']} vs {fixture['team_b']}"
+        team_a = fixture["team_a"]
+        team_b = fixture["team_b"]
+
+        st.progress(
+            (idx + 1) / len(fixtures)
         )
 
-        def show_history(team_name, history):
-            st.markdown(f"### {team_name} — last matches")
+        st.caption(
+            f"Fixture {idx + 1} of {len(fixtures)}"
+            f"  |  Worksheet: {fixture['worksheet']}"
+        )
+
+        st.header(
+            f"{team_a} vs {team_b}"
+        )
+
+        st.write(
+            f"**Match date:** "
+            f"{fixture['actual_date'] or 'Not available'}"
+        )
+
+        phase = st.session_state.phase
+
+        # ----------------------------------------------------
+        # TEAM A HISTORY
+        # ----------------------------------------------------
+
+        if phase == "team_a":
+
+            st.subheader(
+                f"Team A: {team_a}"
+            )
+
+            st.write(
+                "Review Team A's historical matches carefully."
+            )
+
             st.dataframe(
-                pd.DataFrame(history),
+                pd.DataFrame(
+                    fixture["team_a_history"]
+                ),
                 use_container_width=True,
                 hide_index=True
             )
 
-        if st.session_state.phase == "team_a":
-            elapsed = int(time.time() - st.session_state.phase_started)
-            st.info(
-                f"Team A analysis time: {elapsed // 60}:"
-                f"{elapsed % 60:02d}"
-            )
-            show_history(fixture["team_a"], fixture["history_a"])
+            if st.button(
+                "Continue to Team B",
+                type="primary"
+            ):
 
-            if st.button("Next — Team B"):
-                st.session_state.answers.setdefault(idx, {})[
+                st.session_state.answers[
                     "team_a_seconds"
-                ] = elapsed
+                ] = round(
+                    time.time()
+                    - st.session_state.phase_started,
+                    2
+                )
+
                 st.session_state.phase = "team_b"
                 st.session_state.phase_started = time.time()
+
                 st.rerun()
 
-        elif st.session_state.phase == "team_b":
-            elapsed = int(time.time() - st.session_state.phase_started)
-            st.info(
-                f"Team B analysis time: {elapsed // 60}:"
-                f"{elapsed % 60:02d}"
-            )
-            show_history(fixture["team_b"], fixture["history_b"])
+        # ----------------------------------------------------
+        # TEAM B HISTORY
+        # ----------------------------------------------------
 
-            if st.button("Next — Make prediction"):
-                st.session_state.answers.setdefault(idx, {})[
-                    "team_b_seconds"
-                ] = elapsed
-                st.session_state.phase = "predict"
-                st.session_state.phase_started = time.time()
-                st.rerun()
+        elif phase == "team_b":
 
-        elif st.session_state.phase == "predict":
-            elapsed = int(time.time() - st.session_state.phase_started)
-            st.info(
-                f"Prediction time: {elapsed // 60}:"
-                f"{elapsed % 60:02d}"
+            st.subheader(
+                f"Team B: {team_b}"
             )
 
-            pick = st.radio(
-                "Choose your prediction",
-                ["1", "X", "2"],
-                format_func=lambda x: {
-                    "1": f"1 — {fixture['team_a']} wins",
-                    "X": "X — Draw",
-                    "2": f"2 — {fixture['team_b']} wins"
-                }[x],
-                horizontal=True,
-                key=f"pick_{idx}"
+            st.write(
+                "Review Team B's historical matches carefully."
             )
 
-            if st.button("Reveal actual result"):
-                actual = result_to_pick(fixture["actual_score"])
-                answer = st.session_state.answers.setdefault(idx, {})
-                answer["prediction_seconds"] = elapsed
+            st.dataframe(
+                pd.DataFrame(
+                    fixture["team_b_history"]
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
 
-                row = {
-                    "saved_at": datetime.now().isoformat(timespec="seconds"),
-                    "fixture": idx + 1,
-                    "team_a": fixture["team_a"],
-                    "team_b": fixture["team_b"],
-                    "prediction": pick,
-                    "actual": actual,
-                    "correct": pick == actual if actual else "",
-                    "team_a_seconds": answer.get("team_a_seconds", 0),
-                    "team_b_seconds": answer.get("team_b_seconds", 0),
-                    "prediction_seconds": elapsed,
-                    "group_number": idx // 2 + 1,
-                    "worksheet": fixture["worksheet"]
-                }
+            col1, col2 = st.columns(2)
 
-                save_result(row)
-                answer["saved_row"] = row
-                st.session_state.phase = "reveal"
-                st.rerun()
+            with col1:
 
-        elif st.session_state.phase == "reveal":
-            answer = st.session_state.answers.get(idx, {})
-            row = answer.get("saved_row", {})
+                if st.button("Back to Team A"):
 
-            st.subheader("Prediction result")
-            st.write(f"Your prediction: **{row.get('prediction', '')}**")
-            st.write(f"Actual score: **{fixture['actual_score']}**")
+                    st.session_state.phase = "team_a"
+                    st.session_state.phase_started = time.time()
 
-            if row.get("actual"):
-                if row.get("correct"):
-                    st.success("Correct prediction!")
-                else:
-                    st.error("Incorrect prediction.")
-            else:
-                st.warning(
-                    "The actual score could not be read. "
-                    "Check column Q in the source workbook."
-                )
+                    st.rerun()
 
-            if st.button("Next fixture"):
-                st.session_state.index += 1
-                st.session_state.phase = "team_a"
-                st.session_state.phase_started = time.time()
-                st.rerun()
+            with col2:
 
-    else:
-        st.success("You've reached the end of the loaded fixtures!")
+                if st.button(
+                    "Make Prediction",
+                    type="primary"
+                ):
 
-        if st.button("Start again"):
-            st.session_state.index = 0
-            st.session_state.phase = "team_a"
-            st.session_state.phase_started = time.time()
-            st.rerun()
-
-
-st.divider()
-st.header("3. Training dashboard")
-
-results = load_results()
-
-if results.empty:
-    st.write("Your statistics will appear here after your first prediction.")
-else:
-    results["correct_bool"] = (
-        results["correct"].astype(str).str.lower()
-        .map({"true": True, "false": False})
-    )
-
-    scored = results[
-        results["actual"].fillna("").astype(str) != ""
-    ]
-
-    total = len(scored)
-    correct_count = int(scored["correct_bool"].fillna(False).sum())
-    accuracy = 100 * correct_count / total if total else 0
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Scored predictions", total)
-    c2.metric("Correct predictions", correct_count)
-    c3.metric("Single-match accuracy", f"{accuracy:.1f}%")
-
-    if total:
-        st.subheader("Recent training results")
-        st.dataframe(
-            results.tail(30),
-            use_container_width=True,
-            hide_index=True
-        )
-
-    if len(results) >= 2:
-        ordered = results.sort_values("saved_at")
-        groups = []
-
-        for _, group in ordered.groupby("group_number"):
-            if len(group) == 2 and (
-                group["actual"].fillna("").astype(str) != ""
-            ).all():
-                groups.append(
-                    bool(group["correct_bool"].fillna(False).all())
-                )
-
-        if groups:
-            group_accuracy = 100 * sum(groups) / len(groups)
-            failed_streak = 0
-            longest_failed_streak = 0
-
-            for passed in groups:
-                if passed:
-                    failed_streak = 0
-                else:
-                    failed_streak += 1
-                    longest_failed_streak = max(
-                        longest_failed_streak, failed_streak
+                    st.session_state.answers[
+                        "team_b_seconds"
+                    ] = round(
+                        time.time()
+                        - st.session_state.phase_started,
+                        2
                     )
 
-            c1, c2 = st.columns(2)
-            c1.metric("Completed two-match groups", len(groups))
-            c2.metric("Both picks correct", f"{group_accuracy:.1f}%")
-            st.metric(
-                "Longest consecutive failed groups",
-                longest_failed_streak
-            )
-            st.metric(
-                "Failed groups in a row (current)",
-                failed_streak
+                    st.session_state.phase = "predict"
+                    st.session_state.phase_started = time.time()
+
+                    st.rerun()
+
+        # ----------------------------------------------------
+        # PREDICTION
+        # ----------------------------------------------------
+
+        elif phase == "predict":
+
+            st.subheader("Make Your Prediction")
+
+            st.write(
+                f"**{team_a}** vs **{team_b}**"
             )
 
-st.caption(
-    "Training tool only. Results are for learning and tracking, "
-    "not a guarantee of betting profits."
-)
+            st.write(
+                "Choose the outcome you believe will happen."
+            )
+
+            choice = st.radio(
+                "Your prediction",
+                ["1", "X", "2"],
+                format_func=lambda value: {
+                    "1": f"1 — {team_a} wins",
+                    "X": "X — Draw",
+                    "2": f"2 — {team_b} wins"
+                }[value],
+                key=f"prediction_{idx}"
+            )
+
+            st.caption(
+                "1 = Home/Team A win | X = Draw | "
+                "2 = Away/Team B win"
+            )
+
+            if st.button(
+                "Lock Prediction",
+                type="primary"
+            ):
+
+                st.session_state.answers["prediction"] = choice
+
+                st.session_state.answers[
+                    "prediction_seconds"
+                ] = round(
+                    time.time()
+                    - st.session_state.phase_started,
+                    2
+                )
+
+                st.session_state.phase = "reveal"
+                st.session_state.phase_started = time.time()
+
+                st.rerun()
+
+        # ----------------------------------------------------
+        # REVEAL ACTUAL RESULT
+        # ----------------------------------------------------
+
+        elif phase == "reveal":
+
+            st.subheader("Prediction Locked")
+
+            prediction = st.session_state.answers.get(
+                "prediction",
+                ""
+            )
+
+            st.write(
+                f"**Your prediction:** {format_pick(prediction)}"
+            )
+
+            actual_score = fixture["actual_score"]
+
+            actual_pick = result_to_pick(
+                actual_score
+            )
+
+            if actual_score:
+
+                st.write(
+                    f"**Actual score:** {actual_score}"
+                )
+
+                st.write(
+        
