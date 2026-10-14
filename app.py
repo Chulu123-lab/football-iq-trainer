@@ -398,4 +398,4 @@ if os.path.exists("training_results.csv"):
         ta=pd.to_numeric(results["team_a_seconds"],errors="coerce").dropna()
         tb=pd.to_numeric(results["team_b_seconds"],errors="coerce").dropna()
         times=pd.concat([ta,tb])
-        st.metric("Average analysis time per team",f"{times.mean(
+        st.metric("Average analysis time per team",f"{times.mean)
