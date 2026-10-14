@@ -2,3 +2,5 @@ streamlit==1.52.0
 pandas
 streamlit-autorefresh
 gdown
+openpyxl
+xlrd
