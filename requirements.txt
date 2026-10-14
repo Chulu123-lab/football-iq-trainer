@@ -1,6 +1,7 @@
-streamlit==1.52.0
-pandas
+streamlit
 streamlit-autorefresh
-gdown
+pandas
+gspread
+google-auth
 openpyxl
 xlrd
