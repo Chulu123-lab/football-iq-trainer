@@ -386,16 +386,69 @@ if frames:
 # ---------- Dashboard ----------
 st.markdown("---")
 st.header("Training dashboard")
+
 if os.path.exists("training_results.csv"):
-    results=pd.read_csv("training_results.csv")
+    results = pd.read_csv("training_results.csv")
+
     if not results.empty:
-        scorable=results[results["actual"].isin(["1","X","2"])]
-        correct=int((scorable["prediction"]==scorable["actual"]).sum())
-        total=len(scorable)
-        c1,c2=st.columns(2)
-        c1.metric("Single-match accuracy",f"{correct/total*100:.1f}%" if total else "—",f"{correct}/{total}" if total else None)
-        c2.metric("Fixtures recorded",len(results))
-        ta=pd.to_numeric(results["team_a_seconds"],errors="coerce").dropna()
-        tb=pd.to_numeric(results["team_b_seconds"],errors="coerce").dropna()
-        times=pd.concat([ta,tb])
-        st.metric("Average analysis time per team",f"{times.mean(
+        scorable = results[results["actual"].isin(["1", "X", "2"])]
+
+        correct = int(
+            (scorable["prediction"] == scorable["actual"]).sum()
+        )
+
+        total = len(scorable)
+
+        c1, c2 = st.columns(2)
+
+        c1.metric(
+            "Single-match accuracy",
+            f"{correct / total * 100:.1f}%" if total else "—",
+            f"{correct}/{total}" if total else None
+        )
+
+        c2.metric(
+            "Fixtures recorded",
+            len(results)
+        )
+
+        ta = pd.to_numeric(
+            results["team_a_seconds"],
+            errors="coerce"
+        ).dropna()
+
+        tb = pd.to_numeric(
+            results["team_b_seconds"],
+            errors="coerce"
+        ).dropna()
+
+        times = pd.concat([ta, tb])
+
+        st.metric(
+            "Average analysis time per team",
+            f"{times.mean() / 60:.1f} minutes"
+            if not times.empty else "—"
+        )
+
+        st.subheader("Recent training results")
+
+        st.dataframe(
+            results.tail(20).iloc[::-1],
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.subheader("Accuracy breakdown")
+
+        if total:
+            st.write(f"Correct predictions: {correct}")
+            st.write(f"Incorrect predictions: {total - correct}")
+            st.write(f"Scorable predictions: {total}")
+        else:
+            st.info("No scorable predictions recorded yet.")
+
+else:
+    st.info(
+        "No training results recorded yet. "
+        "Complete your first fixture to start tracking your accuracy."
+    )
