@@ -785,11 +785,21 @@ elif st.session_state.phase in [
                 actual_score
             )
 
-            if actual_score:
-
+                        if actual_score:
                 st.write(
                     f"**Actual score:** {actual_score}"
                 )
 
                 st.write(
-        
+                    f"**Actual result:** {format_pick(actual_pick)}"
+                )
+
+                correct = prediction == actual_pick
+
+                if correct:
+                    st.success("Correct prediction!")
+                else:
+                    st.error("Incorrect prediction.")
+
+            else:
+                st.warning("No actual score found for this fixture.")
